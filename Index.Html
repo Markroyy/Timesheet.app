@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Timesheeting App</title>
+  <link rel="stylesheet" href="timesheet.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    let timesheets = {};
+    let pieChart = null; 
+
+    function formatTime(seconds) {
+      const hrs = Math.floor(seconds / 3600).toString().padStart(2, '0');
+      const mins = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+      const secs = (seconds % 60).toString().padStart(2, '0');
+      return `${hrs}:${mins}:${secs}`;
+    }
+
+    function updateOverallTotal() {
+      let total = 0;
+      for (let key in timesheets) {
+        total += timesheets[key].totalTime;
+      }
+      document.getElementById("overall-total-time").textContent = "Overall Time: " + formatTime(total);
+      renderChart();
+    }
+
+    function saveToStorage() {
+      const storageData = {};
+      for (const name in timesheets) {
+        const ts = timesheets[name];
+        storageData[name] = {
+          timer: ts.timer || 0,
+          totalTime: ts.totalTime || 0,
+          running: ts.running,
+          paused: ts.paused,
+          startTime: ts.running ? ts.startTime : null,
+          pauseTime: ts.paused ? Date.now() : null
+        };
+      }
+      localStorage.setItem("timesheets", JSON.stringify(storageData));
+    }
+
+    function loadFromStorage() {
+      const data = JSON.parse(localStorage.getItem("timesheets"));
+      if (!data) return;
+      
+      const now = Date.now();
+      for (const name in data) {
+        const savedTs = data[name];
+        timesheets[name] = { 
+          timer: savedTs.timer || 0,
+          totalTime: savedTs.totalTime || 0,
+          running: false,
+          paused: false,
+          interval: null
+        };
+        
+        renderTimesheet(name);
+        
+        // Handle timers that were running when page was closed
+        if (savedTs.running && savedTs.startTime) {
+          const elapsedSinceClose = Math.floor((now - savedTs.startTime) / 1000);
+          timesheets[name].timer = elapsedSinceClose;
+          // Auto-start the timer again
+          startTimer(name);
+        } else if (savedTs.paused) {
+          timesheets[name].paused = true;
+          const startButton = document.getElementById(`${name}-start`);
+          const resumeButton = document.getElementById(`${name}-resume`);
+          if (startButton) startButton.disabled = true;
+          if (resumeButton) resumeButton.disabled = false;
+        }
+      }
+      updateOverallTotal();
+    }
+
+    function renderTimesheet(name) {
+      const timesheet = timesheets[name];
+      if (!timesheet) return;
+
+      // Remove existing timesheet div if it exists
+      const oldDiv = document.getElementById(`${name}-timesheet`);
+      if (oldDiv) oldDiv.remove();
+
+      // Remove existing table row if it exists
+      const oldRow = document.getElementById(`${name}-total-row`);
+      if (oldRow) oldRow.remove();
+
+      const timesheetDiv = document.createElement("div");
+      timesheetDiv.className = "timesheet";
+      timesheetDiv.id = `${name}-timesheet`;
+      timesheetDiv.innerHTML = `
+        <input type="text" value="${name}" aria-label="Timesheet name" onchange="renameTimesheet('${name}', this.value)" />
+        <p id="${name}-timer" aria-live="polite">${formatTime(timesheet.timer || 0)}</p>
+        <button id="${name}-start" aria-label="Start timer" onclick="startTimer('${name}')"><i class="fas fa-play"></i> Start</button>
+        <button id="${name}-pause" aria-label="Pause timer" onclick="pauseTimer('${name}')" disabled><i class="fas fa-pause"></i> Pause</button>
+        <button id="${name}-resume" aria-label="Resume timer" onclick="resumeTimer('${name}')" disabled><i class="fas fa-play-circle"></i> Resume</button>
+        <button id="${name}-stop" aria-label="Stop timer" onclick="stopTimer('${name}')" disabled><i class="fas fa-stop"></i> Stop</button>
+        <button aria-label="Reset timer" onclick="resetTimer('${name}')"><i class="fas fa-redo"></i> Reset</button>
+        <button aria-label="Delete timesheet" onclick="deleteTimesheet('${name}')"><i class="fas fa-trash"></i> Delete</button>
+      `;
+      document.getElementById("timesheet-container").appendChild(timesheetDiv);
+
+      const table = document.getElementById("total-time-table").getElementsByTagName("tbody")[0];
+      const row = table.insertRow();
+      row.id = `${name}-total-row`;
+      row.insertCell(0).textContent = name;
+      const totalTimeCell = row.insertCell(1);
+      totalTimeCell.id = `${name}-total-time`;
+      totalTimeCell.textContent = formatTime(timesheet.totalTime || 0);
+    }
+
+    function renameTimesheet(oldName, newName) {
+      newName = newName.trim();
+      if (!newName) {
+        alert("Timesheet name cannot be empty.");
+        renderTimesheet(oldName); // Reset input field
+        return;
+      }
+      
+      if (newName === oldName) return; // No change
+      
+      if (timesheets[newName]) {
+        alert("A timesheet with this name already exists.");
+        renderTimesheet(oldName); // Reset input field
+        return;
+      }
+      
+      // Create copy with new name
+      timesheets[newName] = {...timesheets[oldName]};
+      deleteTimesheet(oldName); // Removes old entry
+      renderTimesheet(newName);
+      updateOverallTotal();
+      saveToStorage();
+      logAction(`Renamed timesheet "${oldName}" to "${newName}".`);
+    }
+
+    function startTimer(name) {
+      const ts = timesheets[name];
+      if (!ts) return;
+      
+      if (!ts.running && !ts.paused) {
+        ts.running = true;
+        ts.startTime = Date.now() - (ts.timer || 0) * 1000;
+        ts.interval = setInterval(() => {
+          const elapsed = Math.floor((Date.now() - ts.startTime) / 1000);
+          ts.timer = elapsed;
+          const timerElement = document.getElementById(`${name}-timer`);
+          if (timerElement) timerElement.textContent = formatTime(ts.timer);
+          renderChart(); 
+        }, 1000);
+
+        const startButton = document.getElementById(`${name}-start`);
+        const pauseButton = document.getElementById(`${name}-pause`);
+        const stopButton = document.getElementById(`${name}-stop`);
+        
+        if (startButton) startButton.disabled = true;
+        if (pauseButton) pauseButton.disabled = false;
+        if (stopButton) stopButton.disabled = false;
+
+        saveToStorage();
+        notifyUser(`Timer "${name}" started.`);
+        logAction(`Started timer "${name}".`); 
+      }
+    }
+
+    function pauseTimer(name) {
+      const ts = timesheets[name];
+      if (!ts) return;
+      
+      if (ts.running) {
+        clearInterval(ts.interval);
+        ts.running = false;
+        ts.paused = true;
+
+        const pauseButton = document.getElementById(`${name}-pause`);
+        const resumeButton = document.getElementById(`${name}-resume`);
+        
+        if (pauseButton) pauseButton.disabled = true;
+        if (resumeButton) resumeButton.disabled = false;
+
+        saveToStorage();
+        notifyUser(`Timer "${name}" paused.`);
+        logAction(`Paused timer "${name}".`);
+      }
+    }
+
+    function resumeTimer(name) {
+      const ts = timesheets[name];
+      if (!ts) return;
+      
+      if (!ts.running && ts.paused) {
+        ts.running = true;
+        ts.startTime = Date.now() - ts.timer * 1000;
+        ts.interval = setInterval(() => {
+          const elapsed = Math.floor((Date.now() - ts.startTime) / 1000);
+          ts.timer = elapsed;
+          const timerElement = document.getElementById(`${name}-timer`);
+          if (timerElement) timerElement.textContent = formatTime(ts.timer);
+          renderChart(); 
+        }, 1000);
+
+        const resumeButton = document.getElementById(`${name}-resume`);
+        const pauseButton = document.getElementById(`${name}-pause`);
+        
+        if (resumeButton) resumeButton.disabled = true;
+        if (pauseButton) pauseButton.disabled = false;
+
+        saveToStorage();
+        notifyUser(`Timer "${name}" resumed.`);
+        logAction(`Resumed timer "${name}".`);
+      }
+    }
+
+    function stopTimer(name) {
+      const ts = timesheets[name];
+      if (!ts) return;
+      
+      if (ts.running || ts.paused) {
+        clearInterval(ts.interval);
+        ts.totalTime += ts.timer;
+        ts.timer = 0;
+        ts.running = false;
+        ts.paused = false;
+
+        const timerElement = document.getElementById(`${name}-timer`);
+        const totalTimeElement = document.getElementById(`${name}-total-time`);
+        const startButton = document.getElementById(`${name}-start`);
+        const pauseButton = document.getElementById(`${name}-pause`);
+        const resumeButton = document.getElementById(`${name}-resume`);
+        const stopButton = document.getElementById(`${name}-stop`);
+
+        if (timerElement) timerElement.textContent = formatTime(0);
+        if (totalTimeElement) totalTimeElement.textContent = formatTime(ts.totalTime);
+        
+        if (startButton) startButton.disabled = false;
+        if (pauseButton) pauseButton.disabled = true;
+        if (resumeButton) resumeButton.disabled = true;
+        if (stopButton) stopButton.disabled = true;
+
+        updateOverallTotal();
+        saveToStorage();
+        notifyUser(`Timer "${name}" stopped.`);
+        logAction(`Stopped timer "${name}".`);
+      }
+    }
+
+    function resetTimer(name) {
+      const ts = timesheets[name];
+      if (!ts) return;
+      
+      stopTimer(name);
+      ts.totalTime = 0;
+      const totalTimeElement = document.getElementById(`${name}-total-time`);
+      if (totalTimeElement) totalTimeElement.textContent = formatTime(0);
+      renderChart();
+      saveToStorage();
+      logAction(`Reset timer "${name}".`);
+    }
+
+    function deleteTimesheet(name) {
+      stopTimer(name);
+      delete timesheets[name];
+      const timesheetElement = document.getElementById(`${name}-timesheet`);
+      const rowElement = document.getElementById(`${name}-total-row`);
+      
+      if (timesheetElement) timesheetElement.remove();
+      if (rowElement) rowElement.remove();
+      
+      updateOverallTotal();
+      saveToStorage();
+      logAction(`Deleted timesheet "${name}".`);
+    }
+function renderChart() {
+  const ctx = document.getElementById('timeChart').getContext('2d');
+  const labels = Object.keys(timesheets);
+  const data = Object.values(timesheets).map(ts => ts.totalTime);
+  
+  // Don't attempt to render with no data
+  if (data.length === 0) {
+    if (pieChart) {
+      pieChart.destroy();
+      pieChart = null;
+    }
+    const legendContainer = document.getElementById('chart-legend');
+    if (legendContainer) legendContainer.innerHTML = 'No timesheet data available';
+    return;
+  }
+
+  const rainbowColors = [
+    '#FF4C4C', '#FF9900', '#FFEB3B', '#4CAF50',
+    '#2196F3', '#9C27B0', '#E91E63', '#00BCD4'
+  ];
+
+  const colors = labels.map((_, i) => rainbowColors[i % rainbowColors.length]);
+
+  // Format time for tooltips
+  const formatTimeForTooltip = (seconds) => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${hrs}h ${mins}m ${secs}s`;
+  };
+
+  if (pieChart) {
+    pieChart.data.labels = labels;
+    pieChart.data.datasets[0].data = data;
+    pieChart.data.datasets[0].backgroundColor = colors;
+    pieChart.update();
+  } else {
+    pieChart = new Chart(ctx, {
+      type: 'pie',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: data,
+          backgroundColor: colors
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: { 
+            enabled: true,
+            callbacks: {
+              label: function(context) {
+                const label = context.label || '';
+                const value = context.raw || 0;
+                const formattedTime = formatTimeForTooltip(value);
+                return `${label}: ${formattedTime}`;
+              }
+            }
+          }
+        }
+      }
+    });
+  }
+
+  const legendContainer = document.getElementById('chart-legend');
+  if (!legendContainer) return;
+  
+  legendContainer.innerHTML = '';
+  labels.forEach((label, index) => {
+    const legendItem = document.createElement('div');
+    legendItem.className = 'legend-item';
+    legendItem.innerHTML = `
+      <span class="legend-color" style="background-color: ${colors[index]}"></span>
+      <span class="legend-label">${label} (${formatTimeForTooltip(data[index])})</span>
+    `;
+    legendContainer.appendChild(legendItem);
+  });
+}
+
+    function notifyUser(message) {
+      if ('Notification' in window && Notification.permission === "granted") {
+        new Notification("Timesheeting App", {
+          body: message,
+          icon: "/favicon.ico" // Add a favicon for your app
+        });
+      }
+    }
+
+    function logAction(message) {
+      const logContainer = document.getElementById('log-container');
+      if (!logContainer) return;
+      
+      const logEntry = document.createElement('div');
+      logEntry.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+      logContainer.prepend(logEntry); 
+
+      // Limit log entries to prevent memory issues
+      if (logContainer.children.length > 100) {
+        logContainer.removeChild(logContainer.lastChild);
+      }
+    }
+
+    function resetAll() {
+      for (const name in timesheets) {
+        stopTimer(name); 
+        timesheets[name].totalTime = 0; 
+        const totalTimeElement = document.getElementById(`${name}-total-time`);
+        const timerElement = document.getElementById(`${name}-timer`);
+        
+        if (totalTimeElement) totalTimeElement.textContent = formatTime(0); 
+        if (timerElement) timerElement.textContent = formatTime(0); 
+      }
+
+      renderChart(); 
+      updateOverallTotal(); 
+      saveToStorage(); 
+      notifyUser("All timesheets have been reset.");
+      logAction("Reset all timesheets."); 
+    }
+
+    function addTimesheet() {
+      let name = prompt("Enter a name for the new timesheet:");
+      if (!name) return;
+      name = name.trim();
+      if (!name) {
+        alert("Timesheet name cannot be empty.");
+        return;
+      }
+      if (timesheets[name]) {
+        alert("A timesheet with this name already exists.");
+        return;
+      }
+      timesheets[name] = {
+        timer: 0,
+        totalTime: 0,
+        running: false,
+        paused: false,
+        interval: null
+      };
+      renderTimesheet(name);
+      updateOverallTotal();
+      saveToStorage();
+      logAction(`Added timesheet "${name}".`);
+    }
+
+    function exportToCSV() {
+  // Make sure no timers are running when exporting
+  for (const name in timesheets) {
+    if (timesheets[name].running) {
+      stopTimer(name);
+    }
+  }
+
+  const today = new Date();
+  const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const weekday = weekdays[today.getDay()];
+  const dateString = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+  const timeString = today.toTimeString().split(' ')[0]; // HH:MM:SS format
+  
+  // Calculate overall total time
+  let overallTotalSeconds = 0;
+  Object.values(timesheets).forEach(ts => {
+    overallTotalSeconds += ts.totalTime;
+  });
+  
+  const overallHours = Math.floor(overallTotalSeconds / 3600);
+  const overallMinutes = Math.floor((overallTotalSeconds % 3600) / 60);
+  const overallSeconds = overallTotalSeconds % 60;
+  
+  // Create notes format with clear section headers and include weekday
+  let notesContent = `---------- TIMESHEET EXPORT: ${weekday}, ${dateString} ${timeString} ----------\n\n`;
+  
+  // Add individual timesheet data without seconds count
+  for (const name in timesheets) {
+    const totalSeconds = timesheets[name].totalTime;
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    
+    notesContent += `${name}: ${hours}h ${minutes}m ${seconds}s\n`;
+  }
+  
+  // Add the overall total without seconds count
+  notesContent += `\nOVERALL TOTAL: ${overallHours}h ${overallMinutes}m ${overallSeconds}s\n`;
+  notesContent += `\n-------------------------------------------------\n\n`;
+  
+  // Get previous notes data from local storage
+  let previousNotes = localStorage.getItem('timesheet_notes') || '';
+  
+  // Append the new data to previous data
+  const updatedNotes = notesContent + previousNotes;
+  
+  // Save the updated notes data to localStorage for future exports
+  localStorage.setItem('timesheet_notes', updatedNotes);
+  
+  // Create a blob with the notes content
+  const blob = new Blob([updatedNotes], { type: 'text/plain;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  
+  // Create a link element to trigger the download
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `timesheet_notes_${weekday}_${dateString}.txt`);
+  link.style.visibility = 'hidden';
+  
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  
+  logAction(`Exported timesheets to notes on ${weekday}, ${dateString}.`);
+  notifyUser("Timesheets exported to notes file.");
+  
+  return true;
+}
+    window.onload = () => {
+      loadFromStorage();
+      
+      // Check if the browser supports notifications
+      if ('Notification' in window) {
+        if (Notification.permission !== "granted" && Notification.permission !== "denied") {
+          // Ask for permission when user interacts
+          document.body.addEventListener('click', function requestNotificationPermission() {
+            Notification.requestPermission();
+            document.body.removeEventListener('click', requestNotificationPermission);
+          }, {once: true});
+        }
+      }
+    };
+  </script>
+
+</head>
+<body>
+  <header>
+    <h1>Timesheeting App</h1>
+  </header>
+  <main>
+    <p>Track your time for multiple tasks. Add a timesheet, start/stop the timer, and log your actions.</p>
+    <button class="action-button" onclick="addTimesheet()" aria-label="Add new timesheet">
+      <i class="fas fa-plus"></i> Add Timesheet
+    </button>
+    <button class="action-button" onclick="resetAll()" aria-label="Reset all timesheets">
+      <i class="fas fa-redo"></i> Reset All
+    </button>
+    <button class="action-button" onclick="exportToCSV()" aria-label="Export data to notes">
+      <i class="fas fa-file-export"></i> Export to Notes
+    </button>
+    <div id="timesheet-container"></div>
+    <h2>Total Time</h2>
+    <table id="total-time-table">
+      <thead>
+        <tr>
+          <th>Timesheet Name</th>
+          <th>Total Time</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="summary" id="overall-total-time">Overall Time: 00:00:00</div>
+    <h2>Time Distribution</h2>
+    <canvas id="timeChart"></canvas>
+    <div id="chart-legend"></div>
+    <h2>Action Log</h2>
+    <div id="log-container"></div>
+  </main>
+  <footer>
+    <p>&copy; 2025 Timesheeting App</p>
+  </footer>
+</body>
+</html>
