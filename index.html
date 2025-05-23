@@ -6,10 +6,23 @@
   <title>Timesheeting App</title>
   <link rel="stylesheet" href="timesheet.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+  <link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#6C63FF">
+
+
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     let timesheets = {};
     let pieChart = null; 
+
+    if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js')
+      .then(reg => console.log('Service Worker registered:', reg.scope))
+      .catch(err => console.error('Service Worker failed:', err));
+  });
+}
 
     function formatTime(seconds) {
       const hrs = Math.floor(seconds / 3600).toString().padStart(2, '0');
@@ -37,7 +50,9 @@
           running: ts.running,
           paused: ts.paused,
           startTime: ts.running ? ts.startTime : null,
-          pauseTime: ts.paused ? Date.now() : null
+          pauseTime: ts.paused ? Date.now() : null,
+          todayTotal: ts.todayTotal || 0,
+          lastUpdated: ts.lastUpdated || new Date().toISOString().split('T')[0]
         };
       }
       localStorage.setItem("timesheets", JSON.stringify(storageData));
@@ -46,18 +61,20 @@
     function loadFromStorage() {
       const data = JSON.parse(localStorage.getItem("timesheets"));
       if (!data) return;
-      
+
       const now = Date.now();
+      const today = new Date().toISOString().split('T')[0];
       for (const name in data) {
         const savedTs = data[name];
-        timesheets[name] = { 
+        timesheets[name] = {
           timer: savedTs.timer || 0,
           totalTime: savedTs.totalTime || 0,
           running: false,
           paused: false,
-          interval: null
+          interval: null,
+          todayTotal: (savedTs.lastUpdated === today) ? (savedTs.todayTotal || 0) : 0,
+          lastUpdated: (savedTs.lastUpdated === today) ? today : today
         };
-        
         renderTimesheet(name);
         
         // Handle timers that were running when page was closed
@@ -162,7 +179,6 @@
         if (stopButton) stopButton.disabled = false;
 
         saveToStorage();
-        notifyUser(`Timer "${name}" started.`);
         logAction(`Started timer "${name}".`); 
       }
     }
@@ -183,7 +199,6 @@
         if (resumeButton) resumeButton.disabled = false;
 
         saveToStorage();
-        notifyUser(`Timer "${name}" paused.`);
         logAction(`Paused timer "${name}".`);
       }
     }
@@ -210,7 +225,6 @@
         if (pauseButton) pauseButton.disabled = false;
 
         saveToStorage();
-        notifyUser(`Timer "${name}" resumed.`);
         logAction(`Resumed timer "${name}".`);
       }
     }
@@ -218,13 +232,22 @@
     function stopTimer(name) {
       const ts = timesheets[name];
       if (!ts) return;
-      
+
       if (ts.running || ts.paused) {
         clearInterval(ts.interval);
-        ts.totalTime += ts.timer;
-        ts.timer = 0;
         ts.running = false;
         ts.paused = false;
+
+        // --- Track today's total ---
+        const today = new Date().toISOString().split('T')[0];
+        if (ts.lastUpdated !== today) {
+          ts.todayTotal = 0;
+          ts.lastUpdated = today;
+        }
+        ts.todayTotal += ts.timer;
+
+        ts.totalTime += ts.timer;
+        ts.timer = 0;
 
         const timerElement = document.getElementById(`${name}-timer`);
         const totalTimeElement = document.getElementById(`${name}-total-time`);
@@ -243,7 +266,6 @@
 
         updateOverallTotal();
         saveToStorage();
-        notifyUser(`Timer "${name}" stopped.`);
         logAction(`Stopped timer "${name}".`);
       }
     }
@@ -257,7 +279,6 @@
       const totalTimeElement = document.getElementById(`${name}-total-time`);
       if (totalTimeElement) totalTimeElement.textContent = formatTime(0);
       renderChart();
-      saveToStorage();
       logAction(`Reset timer "${name}".`);
     }
 
@@ -356,15 +377,6 @@ function renderChart() {
   });
 }
 
-    function notifyUser(message) {
-      if ('Notification' in window && Notification.permission === "granted") {
-        new Notification("Timesheeting App", {
-          body: message,
-          icon: "/favicon.ico" // Add a favicon for your app
-        });
-      }
-    }
-
     function logAction(message) {
       const logContainer = document.getElementById('log-container');
       if (!logContainer) return;
@@ -381,20 +393,23 @@ function renderChart() {
 
     function resetAll() {
       for (const name in timesheets) {
-        stopTimer(name); 
-        timesheets[name].totalTime = 0; 
+        stopTimer(name);
+        timesheets[name].totalTime = 0;
+        timesheets[name].todayTotal = 0;
+        timesheets[name].timer = 0;
+        timesheets[name].lastUpdated = new Date().toISOString().split('T')[0];
         const totalTimeElement = document.getElementById(`${name}-total-time`);
         const timerElement = document.getElementById(`${name}-timer`);
-        
-        if (totalTimeElement) totalTimeElement.textContent = formatTime(0); 
-        if (timerElement) timerElement.textContent = formatTime(0); 
+        if (totalTimeElement) totalTimeElement.textContent = formatTime(0);
+        if (timerElement) timerElement.textContent = formatTime(0);
       }
-
-      renderChart(); 
-      updateOverallTotal(); 
-      saveToStorage(); 
-      notifyUser("All timesheets have been reset.");
-      logAction("Reset all timesheets."); 
+      // Clear action log
+      const logContainer = document.getElementById('log-container');
+      if (logContainer) logContainer.innerHTML = '';
+      renderChart();
+      updateOverallTotal();
+      saveToStorage();
+      logAction("Reset all timesheets and cleared action log.");
     }
 
     function addTimesheet() {
@@ -414,7 +429,9 @@ function renderChart() {
         totalTime: 0,
         running: false,
         paused: false,
-        interval: null
+        interval: null,
+        todayTotal: 0,
+        lastUpdated: new Date().toISOString().split('T')[0] // YYYY-MM-DD
       };
       renderTimesheet(name);
       updateOverallTotal();
@@ -442,16 +459,22 @@ function renderChart() {
     overallTotalSeconds += ts.totalTime;
   });
   
-  const overallHours = Math.floor(overallTotalSeconds / 3600);
-  const overallMinutes = Math.floor((overallTotalSeconds % 3600) / 60);
-  const overallSeconds = overallTotalSeconds % 60;
+  // Calculate today's overall total time
+  let todayOverallSeconds = 0;
+  Object.values(timesheets).forEach(ts => {
+    todayOverallSeconds += ts.todayTotal || 0;
+  });
+
+  const overallHours = Math.floor(todayOverallSeconds / 3600);
+  const overallMinutes = Math.floor((todayOverallSeconds % 3600) / 60);
+  const overallSeconds = todayOverallSeconds % 60;
   
   // Create notes format with clear section headers and include weekday
   let notesContent = `---------- TIMESHEET EXPORT: ${weekday}, ${dateString} ${timeString} ----------\n\n`;
   
-  // Add individual timesheet data without seconds count
+  // Add individual timesheet data for today only
   for (const name in timesheets) {
-    const totalSeconds = timesheets[name].totalTime;
+    const totalSeconds = timesheets[name].todayTotal || 0;
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
@@ -459,7 +482,7 @@ function renderChart() {
     notesContent += `${name}: ${hours}h ${minutes}m ${seconds}s\n`;
   }
   
-  // Add the overall total without seconds count
+  // Add the overall total for today only
   notesContent += `\nOVERALL TOTAL: ${overallHours}h ${overallMinutes}m ${overallSeconds}s\n`;
   notesContent += `\n-------------------------------------------------\n\n`;
   
@@ -491,21 +514,36 @@ function renderChart() {
   
   return true;
 }
-    window.onload = () => {
-      loadFromStorage();
-      
-      // Check if the browser supports notifications
-      if ('Notification' in window) {
-        if (Notification.permission !== "granted" && Notification.permission !== "denied") {
-          // Ask for permission when user interacts
-          document.body.addEventListener('click', function requestNotificationPermission() {
-            Notification.requestPermission();
-            document.body.removeEventListener('click', requestNotificationPermission);
-          }, {once: true});
-        }
+    // Start the schedule after everything loads
+window.onload = () => {
+  loadFromStorage();
+};
+
+let deferredPrompt;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+
+  // Show your own install button
+  const installBtn = document.getElementById('install-btn');
+  installBtn.style.display = 'block';
+
+  installBtn.addEventListener('click', () => {
+    installBtn.style.display = 'none';
+    deferredPrompt.prompt();
+
+    deferredPrompt.userChoice.then((choiceResult) => {
+      if (choiceResult.outcome === 'accepted') {
+        console.log('User accepted the install prompt');
       }
-    };
+      deferredPrompt = null;
+    });
+  });
+});
   </script>
+
+<button id="install-btn" style="display:none;">Install App</button>
 
 </head>
 <body>
